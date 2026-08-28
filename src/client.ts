@@ -54,8 +54,9 @@ const store = {
 
 /**
  * `#/r/<room>` joins as an editor; `#/r/<room>?v=<token>` joins as a
- * spectator. The token rides in the fragment on purpose — fragments never
- * reach the server over HTTP, so a watch link does not leak into access logs.
+ * spectator. The token rides in the fragment so the page load itself never
+ * sends it; it does still travel in the WebSocket upgrade's query string,
+ * where the room reads it (same channel the room id already uses).
  */
 function parseRoom(): { id: string; watchToken: string | null } {
   const m = location.hash.match(/^#\/r\/([A-Za-z0-9_-]{1,64})(?:\?v=([A-Za-z0-9_-]{1,128}))?$/);
