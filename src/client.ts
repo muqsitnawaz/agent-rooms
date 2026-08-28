@@ -8,7 +8,7 @@
  */
 
 import * as Y from "yjs";
-import { b64ToBytes, bytesToB64, COLORS, type Peer, type RoomEvent, type ServerMessage } from "./protocol";
+import { b64ToBytes, bytesToB64, COLORS, type Peer, type PeerKind, type RoomEvent, type ServerMessage } from "./protocol";
 
 // ---------------------------------------------------------------- identity
 
@@ -52,30 +52,41 @@ const store = {
 
 // -------------------------------------------------------------------- room
 
-function roomId(): string {
-  const m = location.hash.match(/^#\/r\/([A-Za-z0-9_-]{1,64})$/);
-  if (m) return m[1];
+/**
+ * `#/r/<room>` joins as an editor; `#/r/<room>?v=<token>` joins as a
+ * spectator. The token rides in the fragment on purpose — fragments never
+ * reach the server over HTTP, so a watch link does not leak into access logs.
+ */
+function parseRoom(): { id: string; watchToken: string | null } {
+  const m = location.hash.match(/^#\/r\/([A-Za-z0-9_-]{1,64})(?:\?v=([A-Za-z0-9_-]{1,128}))?$/);
+  if (m) return { id: m[1], watchToken: m[2] ?? null };
   const id = `${ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)]}-${ANIMALS[Math.floor(Math.random() * ANIMALS.length)]}-${Math.random().toString(36).slice(2, 6)}`;
   location.hash = `#/r/${id}`;
-  return id;
+  return { id, watchToken: null };
 }
 
-const ROOM = roomId();
+const { id: ROOM, watchToken } = parseRoom();
+/** True when this tab is watch-only. Decided by the URL, enforced by the server. */
+const SPECTATING = watchToken !== null;
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
 
 const el = {
   title: $<HTMLInputElement>("#title"),
   humans: $<HTMLDivElement>("#humans"),
   agents: $<HTMLDivElement>("#agents"),
+  specs: $<HTMLDivElement>("#specs"),
   humanCount: $<HTMLSpanElement>("#humanCount"),
   agentCount: $<HTMLSpanElement>("#agentCount"),
+  specCount: $<HTMLSpanElement>("#specCount"),
   agentRail: $<HTMLDivElement>("#agentRail"),
+  specRail: $<HTMLDivElement>("#specRail"),
   brief: $<HTMLTextAreaElement>("#brief"),
   carets: $<HTMLDivElement>("#carets"),
   feed: $<HTMLDivElement>("#feed"),
   composer: $<HTMLInputElement>("#composer"),
   run: $<HTMLButtonElement>("#run"),
   share: $<HTMLButtonElement>("#share"),
+  watch: $<HTMLButtonElement>("#watch"),
   status: $<HTMLSpanElement>("#status"),
   me: $<HTMLSpanElement>("#me"),
   roomName: $<HTMLSpanElement>("#roomName"),
@@ -97,6 +108,7 @@ function connect() {
   const mine = ++generation;
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const qs = new URLSearchParams({ as: store.name, color: store.color, kind: "human" });
+  if (watchToken) qs.set("v", watchToken);
   const sock = new WebSocket(`${proto}//${location.host}/agents/room-agent/${ROOM}?${qs}`);
   ws = sock;
 
@@ -107,8 +119,14 @@ function connect() {
   };
   // Guarded by generation: a superseded socket closing late would otherwise
   // repaint "reconnecting" over a connection that is already live.
-  sock.onclose = () => {
+  sock.onclose = (ev) => {
     if (mine !== generation) return;
+    // 1008 = the room turned this connection away (bad watch token).
+    // Retrying would just knock on the same locked door once a second.
+    if (ev.code === 1008) {
+      setStatus("watch link not valid", false);
+      return;
+    }
     setStatus("reconnecting", false);
     setTimeout(connect, 1000);
   };
@@ -118,7 +136,15 @@ function connect() {
   };
 }
 
-function send(msg: unknown) {
+/**
+ * Everything a spectator must not do, dropped at the source. The server
+ * enforces this anyway; the client guard just keeps a watch-only tab from
+ * arguing with the room (the Yjs sync1 reply, for one, is an `update`).
+ */
+const MUTATING = new Set(["update", "steer", "run", "stop", "title", "event", "cursor"]);
+
+function send(msg: { t: string } & Record<string, unknown>) {
+  if (SPECTATING && MUTATING.has(msg.t)) return;
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
 
@@ -227,7 +253,7 @@ function drawCarets() {
   const text = ytext.toString();
   el.carets.innerHTML = "";
   for (const p of peers) {
-    if (p.id === myId || p.cursor == null) continue;
+    if (p.id === myId || p.cursor == null || p.kind === "spectator") continue;
     const isAgent = p.kind === "agent";
     const pt = offsetToPoint(text, Math.min(p.cursor, text.length));
     const x = pt.x - el.brief.scrollLeft;
@@ -264,24 +290,34 @@ function drawCarets() {
 function drawPeers() {
   const humans = peers.filter((p) => p.kind === "human");
   const agents = peers.filter((p) => p.kind === "agent");
+  const specs = peers.filter((p) => p.kind === "spectator");
   const chip = (p: Peer) => {
     const dot = document.createElement("div");
-    dot.className = `peer${p.kind === "agent" ? " agent" : ""}`;
-    dot.style.background = p.color;
-    dot.title = p.kind === "agent" ? `${p.name} (agent)` : `${p.name} (human)`;
-    dot.textContent = p.kind === "agent"
-      ? "◆"
-      : p.name.split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase();
+    dot.className = `peer${p.kind === "agent" ? " agent" : ""}${p.kind === "spectator" ? " spectator" : ""}`;
+    dot.title = p.kind === "agent" ? `${p.name} (agent)` : p.kind === "spectator" ? `${p.name} (watching)` : `${p.name} (human)`;
+    if (p.kind === "spectator") {
+      // Watchers are hollow: no fill, no initials — an eye, not an author.
+      dot.textContent = "◎";
+    } else {
+      dot.style.background = p.color;
+      dot.textContent = p.kind === "agent"
+        ? "◆"
+        : p.name.split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase();
+    }
     if (p.kind === "agent" && p.activity) dot.classList.add("busy");
     return dot;
   };
   el.humans.innerHTML = "";
   el.agents.innerHTML = "";
+  el.specs.innerHTML = "";
   for (const p of humans) el.humans.appendChild(chip(p));
   for (const p of agents) el.agents.appendChild(chip(p));
+  for (const p of specs) el.specs.appendChild(chip(p));
   el.humanCount.textContent = String(humans.length);
   el.agentCount.textContent = String(agents.length);
+  el.specCount.textContent = String(specs.length);
   el.agentRail.classList.toggle("empty", agents.length === 0);
+  el.specRail.classList.toggle("empty", specs.length === 0);
 }
 
 // ------------------------------------------------------------------- feed
@@ -292,7 +328,7 @@ function atBottom() {
   return el.feed.scrollHeight - el.feed.scrollTop - el.feed.clientHeight < 80;
 }
 
-function feedRow(actor: string, color: string, by: "human" | "agent", kind: RoomEvent["kind"], body: string) {
+function feedRow(actor: string, color: string, by: PeerKind, kind: RoomEvent["kind"], body: string) {
   const stick = atBottom();
   const row = document.createElement("div");
   row.className = `row ${kind} by-${by}`;
@@ -316,8 +352,12 @@ function handle(msg: ServerMessage) {
   switch (msg.t) {
     case "welcome": {
       myId = msg.you.id;
-      el.me.textContent = msg.you.name;
+      el.me.textContent = SPECTATING ? `${msg.you.name} · watching` : msg.you.name;
       el.me.style.color = msg.you.color;
+      if (msg.spectatorToken && !SPECTATING) {
+        watchUrl = `${location.origin}${location.pathname}#/r/${ROOM}?v=${msg.spectatorToken}`;
+        el.watch.hidden = false;
+      }
       el.title.value = msg.title === "untitled room" ? "" : msg.title;
       el.feed.innerHTML = "";
       for (const e of msg.events) feedRow(e.actor, e.color, e.by, e.kind, e.body);
@@ -402,15 +442,28 @@ el.composer.addEventListener("keydown", (e) => {
   send({ t: "steer", text });
 });
 
+function flashCopied(btn: HTMLButtonElement) {
+  const before = btn.textContent;
+  btn.textContent = "Copied";
+  btn.classList.add("ok");
+  setTimeout(() => {
+    btn.textContent = before;
+    btn.classList.remove("ok");
+  }, 1400);
+}
+
 el.share.addEventListener("click", async () => {
   await navigator.clipboard.writeText(location.href);
-  const before = el.share.textContent;
-  el.share.textContent = "Copied";
-  el.share.classList.add("ok");
-  setTimeout(() => {
-    el.share.textContent = before;
-    el.share.classList.remove("ok");
-  }, 1400);
+  flashCopied(el.share);
+});
+
+/** Watch-only link for this room. Arrives with `welcome`; editors only. */
+let watchUrl: string | null = null;
+
+el.watch.addEventListener("click", async () => {
+  if (!watchUrl) return;
+  await navigator.clipboard.writeText(watchUrl);
+  flashCopied(el.watch);
 });
 
 el.title.addEventListener("input", () => send({ t: "title", title: el.title.value }));
@@ -430,6 +483,17 @@ window.addEventListener("resize", () => {
   measure();
   drawCarets();
 });
+
+// A watch-only tab looks watch-only before the first byte arrives: the brief
+// and title are frozen, the composer and Run are gone. The server enforces
+// all of it regardless — this is presentation, not the lock.
+if (SPECTATING) {
+  document.body.classList.add("spectating");
+  el.brief.readOnly = true;
+  el.title.readOnly = true;
+  el.composer.disabled = true;
+  el.composer.placeholder = "you are watching — read only";
+}
 
 measure();
 connect();

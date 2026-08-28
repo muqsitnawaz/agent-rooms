@@ -11,7 +11,7 @@
  * a colour, a row in the presence rail, and a cursor in the document.
  */
 
-export type PeerKind = "human" | "agent";
+export type PeerKind = "human" | "agent" | "spectator";
 
 export type Peer = {
   id: string;
@@ -51,7 +51,19 @@ export type ClientMessage =
 
 /** Server -> client. */
 export type ServerMessage =
-  | { t: "welcome"; you: Peer; title: string; running: boolean; events: RoomEvent[] }
+  | {
+      t: "welcome";
+      you: Peer;
+      title: string;
+      running: boolean;
+      events: RoomEvent[];
+      /**
+       * The room's watch-only token, for building a spectator link. Sent to
+       * editors and agents; withheld from spectators so a watch link never
+       * mints further capability than the one it carries.
+       */
+      spectatorToken?: string;
+    }
   | { t: "sync1"; sv: string }
   | { t: "sync2"; update: string }
   | { t: "update"; update: string }
