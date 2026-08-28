@@ -87,7 +87,7 @@ type RoomState = {
 type ConnState = {
   name: string;
   color: string;
-  kind: "human" | "agent";
+  kind: PeerKind;
   cursor: number | null;
   activity: string | null;
   /** Captured at connect: a WebSocket frame carries no headers to read it from later. */
@@ -106,6 +106,9 @@ const MAX_FEED = 400;
  * account. Cap it per room so one shared URL cannot drain a quota.
  */
 const MAX_RUNS_PER_ROOM = 30;
+
+/** Spectators are watchers, not authors — one muted colour for all of them. */
+const SPECTATOR_COLOR = "#7a7a7a";
 
 export class RoomAgent extends Agent<Env, RoomState> {
   initialState: RoomState = { title: "untitled room", running: false, runner: null, runs: 0 };
@@ -139,6 +142,25 @@ export class RoomAgent extends Agent<Env, RoomState> {
       id INTEGER PRIMARY KEY,
       update_b64 TEXT NOT NULL
     )`;
+    this.sql`CREATE TABLE IF NOT EXISTS meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )`;
+  }
+
+  /**
+   * The room's watch-only token: random, minted once per room, persisted next
+   * to the doc. There is no key material to configure — the room itself is the
+   * only thing that can say which token it minted, which is exactly the access
+   * model the rest of the room already uses (the DO is the truth).
+   */
+  private spectatorToken(): string {
+    this.ensureTables();
+    const rows = this.sql<{ value: string }>`SELECT value FROM meta WHERE key = 'spectator_token'`;
+    if (rows.length > 0) return rows[0].value;
+    const token = crypto.randomUUID().replaceAll("-", "");
+    this.sql`INSERT INTO meta (key, value) VALUES ('spectator_token', ${token})`;
+    return token;
   }
 
   /**
@@ -221,12 +243,34 @@ export class RoomAgent extends Agent<Env, RoomState> {
 
   // ------------------------------------------------------------- lifecycle
 
+  /** Constant-time check of a presented watch token against the room's own. */
+  private isSpectatorToken(presented: string): boolean {
+    const enc = new TextEncoder();
+    const a = enc.encode(presented);
+    const b = enc.encode(this.spectatorToken());
+    return a.byteLength === b.byteLength && crypto.subtle.timingSafeEqual(a, b);
+  }
+
   async onConnect(conn: Connection<ConnState>, ctx: ConnectionContext) {
     this.loadDoc();
     const url = new URL(ctx.request.url);
     const name = (url.searchParams.get("as") || "guest").slice(0, 24);
-    const kind = url.searchParams.get("kind") === "agent" ? "agent" : "human";
-    const color = kind === "agent" ? AGENT_COLOR : url.searchParams.get("color") || "#38bdf8";
+
+    // A connection presenting `v` is asking to WATCH. A valid token joins
+    // read-only; an invalid one is turned away at the door rather than being
+    // quietly upgraded to an editor.
+    const presented = url.searchParams.get("v");
+    if (presented !== null && !this.isSpectatorToken(presented)) {
+      conn.send(JSON.stringify({ t: "error", message: "this watch link is not valid for this room" } satisfies ServerMessage));
+      conn.close(1008, "invalid spectator token");
+      return;
+    }
+    const kind: PeerKind =
+      presented !== null ? "spectator" : url.searchParams.get("kind") === "agent" ? "agent" : "human";
+    const color =
+      kind === "agent" ? AGENT_COLOR :
+      kind === "spectator" ? SPECTATOR_COLOR :
+      url.searchParams.get("color") || "#38bdf8";
 
     const ip = ctx.request.headers.get("cf-connecting-ip") ?? "unknown";
     conn.setState({ name, color, kind, cursor: null, activity: null, ip });
@@ -237,6 +281,9 @@ export class RoomAgent extends Agent<Env, RoomState> {
       title: this.state.title,
       running: this.state.running,
       events: this.recentEvents(),
+      // Editors get the watch token so they can hand out watch-only links.
+      // Spectators do not get it back — they hold a link, not the room.
+      ...(kind === "spectator" ? {} : { spectatorToken: this.spectatorToken() }),
     };
     conn.send(JSON.stringify(welcome));
 
@@ -244,7 +291,12 @@ export class RoomAgent extends Agent<Env, RoomState> {
     // even if it never speaks first.
     conn.send(JSON.stringify({ t: "sync1", sv: bytesToB64(Y.encodeStateVector(this.doc)) } satisfies ServerMessage));
 
-    this.announce(name, color, kind, kind === "agent" ? "joined the room as an agent" : "joined the room");
+    this.announce(
+      name,
+      color,
+      kind,
+      kind === "agent" ? "joined the room as an agent" : kind === "spectator" ? "is watching" : "joined the room",
+    );
     this.sendPeers();
   }
 
@@ -266,6 +318,25 @@ export class RoomAgent extends Agent<Env, RoomState> {
     }
     this.loadDoc();
     const me = conn.state;
+
+    // Read-only means read-only: a spectator is refused on EVERY mutating
+    // message, not just the obvious ones — otherwise "watch-only" quietly
+    // leaves renaming the room or killing a run on the table.
+    if (me?.kind === "spectator") {
+      switch (msg.t) {
+        case "update":
+        case "steer":
+        case "run":
+        case "stop":
+        case "title":
+        case "event":
+          conn.send(JSON.stringify({ t: "error", message: "you are watching this room — spectators cannot edit, steer or run" } satisfies ServerMessage));
+          return;
+        case "cursor":
+          // Watchers do not get a caret in the document; drop it silently.
+          return;
+      }
+    }
 
     switch (msg.t) {
       // --- Yjs sync. The room never interprets the document; it merges and relays.

@@ -77,6 +77,16 @@
     box-shadow: 0 0 0 1px var(--lime), 0 0 12px rgba(163,230,53,.45);
   }
   .peer.agent.busy { animation: agentpulse 1.4s ease-in-out infinite; }
+
+  /* Spectators are hollow rings — present, but visibly not authors. */
+  .rail#specRail.empty { display: none; }
+  .rail#specRail .rail-label { color: #555; }
+  .peer.spectator {
+    background: transparent;
+    border: 1.5px dashed #4a4a4a;
+    color: #7a7a7a;
+    font-size: 11px; font-weight: 400;
+  }
   @keyframes agentpulse {
     0%,100% { box-shadow: 0 0 0 1px var(--lime), 0 0 6px rgba(163,230,53,.35); }
     50%     { box-shadow: 0 0 0 1px var(--lime), 0 0 18px rgba(163,230,53,.85); }
@@ -102,7 +112,13 @@
   #run { border-color: #2f3d16; color: var(--lime); background: #131a08; }
   #run:hover { background: #18220a; }
   #run.stop { border-color: #4a1d1d; color: #f87171; background: #1a0d0d; }
-  #share.ok { color: var(--lime); border-color: #2f3d16; }
+  #share.ok, #watch.ok { color: var(--lime); border-color: #2f3d16; }
+
+  /* Watch-only tab: the write affordances are gone, not merely inert. */
+  body.spectating #run, body.spectating footer .kbd { display: none; }
+  body.spectating #composer { opacity: .45; cursor: default; }
+  body.spectating #brief { caret-color: transparent; }
+  body.spectating #title { pointer-events: none; }
   #me { font-family: var(--mono); font-size: 11px; cursor: pointer; border-bottom: 1px dotted #333; }
 
   /* ------------------------------------------------------------ panes */
@@ -207,8 +223,10 @@
     <span id="me">you</span>
     <div class="rail"><span class="rail-label"><span id="humanCount">0</span> human</span><div id="humans"></div></div>
     <div class="rail" id="agentRail"><span class="rail-label"><span id="agentCount">0</span> agent</span><div id="agents"></div></div>
+    <div class="rail empty" id="specRail"><span class="rail-label"><span id="specCount">0</span> watching</span><div id="specs"></div></div>
     <span id="status">connecting</span>
     <button id="share">Share link</button>
+    <button id="watch" hidden>Watch link</button>
     <button id="run">Run agent</button>
   </header>
 
