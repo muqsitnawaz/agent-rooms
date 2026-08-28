@@ -1,0 +1,14 @@
+{
+  "comment": "Local bridge, run by bun.",
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["esnext", "dom"],
+    "types": ["bun"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["bridge/bridge.ts"]
+}

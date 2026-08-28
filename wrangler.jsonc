@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agent-rooms",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "RoomAgent", "class_name": "RoomAgent" },
+      { "name": "RunLimiter", "class_name": "RunLimiter" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RoomAgent"] },
+    { "tag": "v2", "new_sqlite_classes": ["RunLimiter"] }
+  ],
+  "vars": { "RUNS_PER_IP_PER_HOUR": "10" },
+  "ai": { "binding": "AI" },
+  "observability": { "enabled": true }
+}
